@@ -130,20 +130,39 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     }
 
     try {
-      this.client = new Redis({
-        host: this.configService.get('REDIS_HOST') || 'localhost',
-        port: this.configService.get('REDIS_PORT') || 6379,
-        password: this.configService.get('REDIS_PASSWORD') || undefined,
-        retryStrategy: (times) => {
-          if (times > 3) {
-            this.logger.warn('🟡 Redis unavailable, switching to in-memory fallback');
-            this.client = new InMemoryRedis() as any;
-            this.useInMemory = true;
-            return null; // Stop retrying
-          }
-          return Math.min(times * 100, 3000);
-        },
-      });
+      // Support both REDIS_URL and individual config
+      const redisUrl = this.configService.get('REDIS_URL');
+      
+      if (redisUrl) {
+        this.client = new Redis(redisUrl, {
+          retryStrategy: (times) => {
+            if (times > 3) {
+              this.logger.warn('🟡 Redis unavailable, switching to in-memory fallback');
+              this.client = new InMemoryRedis() as any;
+              this.useInMemory = true;
+              return null;
+            }
+            return Math.min(times * 100, 3000);
+          },
+          maxRetriesPerRequest: 3,
+          lazyConnect: true,
+        });
+      } else {
+        this.client = new Redis({
+          host: this.configService.get('REDIS_HOST') || 'localhost',
+          port: this.configService.get('REDIS_PORT') || 6379,
+          password: this.configService.get('REDIS_PASSWORD') || undefined,
+          retryStrategy: (times) => {
+            if (times > 3) {
+              this.logger.warn('🟡 Redis unavailable, switching to in-memory fallback');
+              this.client = new InMemoryRedis() as any;
+              this.useInMemory = true;
+              return null;
+            }
+            return Math.min(times * 100, 3000);
+          },
+        });
+      }
 
       this.client.on('error', (err) => {
         if (!this.useInMemory) {

@@ -1,26 +1,44 @@
 import { NestFactory } from '@nestjs/core';
-import { ValidationPipe } from '@nestjs/common';
+import { ValidationPipe, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import helmet from 'helmet';
 import { AppModule } from './app.module';
+import { GlobalExceptionFilter } from './common/filters/http-exception.filter';
+import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
+import { TimeoutInterceptor } from './common/interceptors/timeout.interceptor';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const logger = new Logger('Bootstrap');
+  const app = await NestFactory.create(AppModule, {
+    logger: ['error', 'warn', 'log', 'debug'],
+  });
   const configService = app.get(ConfigService);
 
   // Security
   app.use(helmet());
 
-  // CORS
+  // CORS - Allow multiple origins for flexibility
+  const frontendUrl = configService.get('FRONTEND_URL');
   app.enableCors({
-    origin: configService.get('FRONTEND_URL'),
+    origin: frontendUrl ? [frontendUrl, 'http://localhost:5173', 'http://localhost:3000'] : '*',
     credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
   });
 
   // Global prefix
   const apiPrefix = configService.get('API_PREFIX') || 'api/v1';
   app.setGlobalPrefix(apiPrefix);
+
+  // Global exception filter
+  app.useGlobalFilters(new GlobalExceptionFilter());
+
+  // Global interceptors
+  app.useGlobalInterceptors(
+    new LoggingInterceptor(),
+    new TimeoutInterceptor(),
+  );
 
   // Validation
   app.useGlobalPipes(
@@ -46,16 +64,27 @@ async function bootstrap() {
       .addTag('presence', 'Live presence system')
       .addTag('location', 'Proximity and location')
       .addTag('find', 'Find listener system')
+      .addTag('capsules', 'Time capsules')
+      .addTag('reactions', 'User reactions')
       .build();
     const document = SwaggerModule.createDocument(app, config);
     SwaggerModule.setup('docs', app, document);
   }
 
+  // Graceful shutdown
+  app.enableShutdownHooks();
+
   const port = configService.get('PORT') || 3000;
   await app.listen(port);
 
-  console.log(`🎵 Resonance backend running on port ${port}`);
-  console.log(`📚 API docs: http://localhost:${port}/docs`);
+  logger.log(`🎵 Resonance backend running on port ${port}`);
+  logger.log(`🌍 Environment: ${configService.get('NODE_ENV') || 'development'}`);
+  if (configService.get('NODE_ENV') !== 'production') {
+    logger.log(`📚 API docs: http://localhost:${port}/docs`);
+  }
 }
 
-bootstrap();
+bootstrap().catch((err) => {
+  console.error('Failed to start application:', err);
+  process.exit(1);
+});
