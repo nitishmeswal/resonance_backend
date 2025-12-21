@@ -31,21 +31,42 @@ import { BlendModule } from './modules/blend/blend.module';
     // Database
     TypeOrmModule.forRootAsync({
       imports: [ConfigModule],
-      useFactory: (configService: ConfigService) => ({
-        type: 'postgres',
-        url: configService.get('DATABASE_URL'),
-        host: configService.get('DATABASE_HOST'),
-        port: configService.get('DATABASE_PORT'),
-        username: configService.get('DATABASE_USERNAME'),
-        password: configService.get('DATABASE_PASSWORD'),
-        database: configService.get('DATABASE_NAME'),
-        entities: [__dirname + '/**/*.entity{.ts,.js}'],
-        synchronize: configService.get('NODE_ENV') === 'development',
-        ssl: configService.get('NODE_ENV') === 'production' 
-          ? { rejectUnauthorized: false } 
-          : false,
-        logging: configService.get('NODE_ENV') === 'development',
-      }),
+      useFactory: (configService: ConfigService) => {
+        const databaseUrl = configService.get('DATABASE_URL');
+        const isProduction = configService.get('NODE_ENV') === 'production';
+        
+        // Base config
+        const config: any = {
+          type: 'postgres',
+          entities: [__dirname + '/**/*.entity{.ts,.js}'],
+          synchronize: !isProduction, // Auto-sync in dev, manual migrations in prod
+          logging: !isProduction,
+          // Connection pool settings for production
+          extra: {
+            max: 10, // Max connections
+            connectionTimeoutMillis: 10000, // 10 seconds
+            idleTimeoutMillis: 30000,
+          },
+        };
+
+        // Use DATABASE_URL if provided (Supabase/Railway format)
+        if (databaseUrl) {
+          config.url = databaseUrl;
+          // Force SSL for production database URLs
+          if (isProduction || databaseUrl.includes('supabase')) {
+            config.ssl = { rejectUnauthorized: false };
+          }
+        } else {
+          // Fallback to individual config
+          config.host = configService.get('DATABASE_HOST') || 'localhost';
+          config.port = configService.get('DATABASE_PORT') || 5432;
+          config.username = configService.get('DATABASE_USERNAME') || 'postgres';
+          config.password = configService.get('DATABASE_PASSWORD') || '';
+          config.database = configService.get('DATABASE_NAME') || 'resonance';
+        }
+
+        return config;
+      },
       inject: [ConfigService],
     }),
 
