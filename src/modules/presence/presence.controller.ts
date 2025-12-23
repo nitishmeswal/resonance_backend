@@ -6,6 +6,7 @@ import {
   Body,
   UseGuards,
   Req,
+  Query,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { Request } from 'express';
@@ -61,9 +62,20 @@ export class PresenceController {
   }
 
   @Get('live-users')
-  @ApiOperation({ summary: 'Get all live users with distances' })
-  async getLiveUsers(@Req() req: Request) {
+  @ApiOperation({ summary: 'Get nearby live users within radius (500m-10km)' })
+  async getLiveUsers(
+    @Req() req: Request,
+    @Query('radiusMeters') radiusMeters?: string,
+  ) {
     const user = req.user as User;
-    return this.presenceService.getLiveUsers(user.id);
+    const radius = radiusMeters ? parseInt(radiusMeters, 10) : undefined;
+    return this.presenceService.getLiveUsers(user.id, radius);
+  }
+
+  @Get('all-live-users')
+  @ApiOperation({ summary: 'Get ALL live users globally (debug only)' })
+  async getAllLiveUsers(@Req() req: Request) {
+    const user = req.user as User;
+    return this.presenceService.getAllLiveUsersGlobal();
   }
 }

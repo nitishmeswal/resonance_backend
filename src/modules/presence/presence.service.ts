@@ -149,26 +149,139 @@ export class PresenceService {
     }
   }
 
-  async getLiveUsers(requestingUserId?: string): Promise<LiveUserData[]> {
+  /**
+   * Get nearby live users within the requesting user's radius setting.
+   * This is the CORE proximity feature - only returns users actually nearby!
+   * 
+   * @param requestingUserId - The user requesting nearby users
+   * @param maxRadiusMeters - Override max radius (default uses user's setting, max 10km)
+   */
+  async getLiveUsers(requestingUserId?: string, maxRadiusMeters?: number): Promise<LiveUserData[]> {
+    // If no requesting user, return empty (can't calculate distance)
+    if (!requestingUserId) {
+      return [];
+    }
+
+    // Get requesting user's location
+    const requestingUserLocation = await this.locationRepository.findOne({
+      where: { userId: requestingUserId },
+    });
+
+    // If requesting user has no location, return empty
+    if (!requestingUserLocation?.geohash) {
+      return [];
+    }
+
+    // Get user's radius setting (default 5km, max 10km)
+    const userStatus = await this.liveStatusRepository.findOne({ where: { userId: requestingUserId } });
+    const userRadiusKm = userStatus?.radiusKm || 5;
+    const radiusMeters = maxRadiusMeters || (userRadiusKm * 1000);
+    const cappedRadiusMeters = Math.min(radiusMeters, 10000); // Cap at 10km
+
+    // Get ALL live users (we'll filter by distance)
+    const liveStatuses = await this.liveStatusRepository.find({
+      where: { isLive: true },
+    });
+
+    const liveUsers: LiveUserData[] = [];
+    const requestingCoords = ngeohash.decode(requestingUserLocation.geohash);
+
+    for (const status of liveStatuses) {
+      // Skip self
+      if (status.userId === requestingUserId) continue;
+
+      // Get user's location
+      const userLocation = await this.locationRepository.findOne({
+        where: { userId: status.userId },
+      });
+
+      // Skip users without location
+      if (!userLocation?.geohash) continue;
+
+      // Calculate actual distance in meters
+      let distanceMeters: number;
+      try {
+        const userCoords = ngeohash.decode(userLocation.geohash);
+        distanceMeters = Math.round(this.haversineDistance(
+          requestingCoords.latitude,
+          requestingCoords.longitude,
+          userCoords.latitude,
+          userCoords.longitude,
+        ));
+      } catch (e) {
+        continue; // Skip if geohash decode fails
+      }
+
+      // 🔴 CRITICAL: Filter by distance - ONLY include users within radius!
+      if (distanceMeters > cappedRadiusMeters) {
+        continue; // Skip users outside radius
+      }
+
+      // Get user profile
+      const user = await this.userRepository.findOne({
+        where: { id: status.userId },
+      });
+      if (!user) continue;
+
+      // Get current track if sharing
+      let currentTrack = null;
+      if (status.shareTrack) {
+        const track = await this.currentTrackRepository.findOne({
+          where: { userId: status.userId },
+        });
+        if (track && track.isPlaying) {
+          currentTrack = {
+            trackName: track.trackName,
+            artist: track.artist,
+            albumArt: track.albumArt,
+            energy: track.energy ?? undefined,
+            valence: track.valence ?? undefined,
+          };
+        }
+      }
+
+      liveUsers.push({
+        userId: user.id,
+        displayName: user.isAnonymous ? 'Anonymous Listener' : user.displayName,
+        avatarUrl: user.isAnonymous ? null : user.avatarUrl,
+        isAnonymous: user.isAnonymous,
+        currentTrack,
+        recentTracks: [],
+        socials: user.isAnonymous ? undefined : {
+          instagram: user.instagramHandle || undefined,
+          discord: user.discordHandle || undefined,
+        },
+        lastActive: status.lastActive,
+        distanceMeters,
+        geohash: userLocation.geohash,
+      });
+    }
+
+    // Sort by distance (closest first)
+    liveUsers.sort((a, b) => {
+      if (a.distanceMeters === undefined) return 1;
+      if (b.distanceMeters === undefined) return -1;
+      return a.distanceMeters - b.distanceMeters;
+    });
+
+    return liveUsers;
+  }
+
+  /**
+   * Get ALL live users globally (for admin/debug purposes only)
+   * Use getLiveUsers() for the actual nearby feature!
+   */
+  async getAllLiveUsersGlobal(): Promise<LiveUserData[]> {
     const liveStatuses = await this.liveStatusRepository.find({
       where: { isLive: true },
     });
 
     const liveUsers: LiveUserData[] = [];
 
-    // Get requesting user's location for distance calculation
-    let requestingUserLocation: LocationSnapshot | null = null;
-    if (requestingUserId) {
-      requestingUserLocation = await this.locationRepository.findOne({
-        where: { userId: requestingUserId },
-      });
-    }
-
     for (const status of liveStatuses) {
       const user = await this.userRepository.findOne({
         where: { id: status.userId },
       });
-
       if (!user) continue;
 
       let currentTrack = null;
@@ -187,32 +300,9 @@ export class PresenceService {
         }
       }
 
-      // Calculate distance if both users have location
-      let distanceMeters: number | undefined;
-      let userGeohash: string | undefined;
-      
       const userLocation = await this.locationRepository.findOne({
         where: { userId: status.userId },
       });
-      
-      if (userLocation) {
-        userGeohash = userLocation.geohash;
-        
-        if (requestingUserLocation?.geohash && userLocation.geohash) {
-          try {
-            const coords1 = ngeohash.decode(requestingUserLocation.geohash);
-            const coords2 = ngeohash.decode(userLocation.geohash);
-            distanceMeters = Math.round(this.haversineDistance(
-              coords1.latitude,
-              coords1.longitude,
-              coords2.latitude,
-              coords2.longitude,
-            ));
-          } catch (e) {
-            // Geohash decode failed, skip distance
-          }
-        }
-      }
 
       liveUsers.push({
         userId: user.id,
@@ -220,23 +310,16 @@ export class PresenceService {
         avatarUrl: user.isAnonymous ? null : user.avatarUrl,
         isAnonymous: user.isAnonymous,
         currentTrack,
-        recentTracks: [], // Will be populated by HistoryService integration
+        recentTracks: [],
         socials: user.isAnonymous ? undefined : {
           instagram: user.instagramHandle || undefined,
           discord: user.discordHandle || undefined,
         },
         lastActive: status.lastActive,
-        distanceMeters,
-        geohash: userGeohash,
+        distanceMeters: undefined,
+        geohash: userLocation?.geohash,
       });
     }
-
-    // Sort by distance (closest first)
-    liveUsers.sort((a, b) => {
-      if (a.distanceMeters === undefined) return 1;
-      if (b.distanceMeters === undefined) return -1;
-      return a.distanceMeters - b.distanceMeters;
-    });
 
     return liveUsers;
   }
