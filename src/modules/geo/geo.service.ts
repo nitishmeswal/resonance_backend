@@ -1,10 +1,10 @@
-import { Injectable, OnModuleInit, Logger } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import Redis from 'ioredis';
 import * as ngeohash from 'ngeohash';
 
 import { User, LiveStatus, CurrentTrack, LocationSnapshot } from '../../database/entities';
+import { RedisService } from '../redis/redis.service';
 
 const REDIS_GEO_KEY = 'resonance:users:live';
 const LOCATION_TTL_SECONDS = 300; // 5 minutes
@@ -41,9 +41,8 @@ export interface NearbyUserWithDetails {
 }
 
 @Injectable()
-export class GeoService implements OnModuleInit {
+export class GeoService {
   private readonly logger = new Logger(GeoService.name);
-  private redis: Redis;
 
   constructor(
     @InjectRepository(User)
@@ -54,29 +53,8 @@ export class GeoService implements OnModuleInit {
     private currentTrackRepository: Repository<CurrentTrack>,
     @InjectRepository(LocationSnapshot)
     private locationRepository: Repository<LocationSnapshot>,
+    private redisService: RedisService,
   ) {}
-
-  async onModuleInit() {
-    // Initialize Redis connection
-    const redisUrl = process.env.REDIS_URL;
-    if (redisUrl) {
-      this.redis = new Redis(redisUrl);
-    } else {
-      this.redis = new Redis({
-        host: process.env.REDIS_HOST || 'localhost',
-        port: parseInt(process.env.REDIS_PORT || '6379'),
-        password: process.env.REDIS_PASSWORD || undefined,
-      });
-    }
-
-    this.redis.on('connect', () => {
-      this.logger.log('Redis GEO connected');
-    });
-
-    this.redis.on('error', (err) => {
-      this.logger.error('Redis GEO error:', err);
-    });
-  }
 
   /**
    * Store user location in Redis GEO set
@@ -85,10 +63,11 @@ export class GeoService implements OnModuleInit {
   async setUserLocation(userId: string, latitude: number, longitude: number): Promise<void> {
     try {
       // Add to Redis GEO set (lng, lat order for Redis)
-      await this.redis.geoadd(REDIS_GEO_KEY, longitude, latitude, userId);
+      await this.redisService.geoAdd(REDIS_GEO_KEY, longitude, latitude, userId);
       
       // Store individual location data with TTL
-      await this.redis.setex(
+      const client = this.redisService.getClient();
+      await client.setex(
         `resonance:location:${userId}`,
         LOCATION_TTL_SECONDS,
         JSON.stringify({ latitude, longitude, updatedAt: Date.now() })
@@ -125,17 +104,13 @@ export class GeoService implements OnModuleInit {
     try {
       // Use GEORADIUS to find nearby users
       // Returns: [[userId, distance, [lng, lat]], ...]
-      const results = await this.redis.georadius(
+      const results = await this.redisService.geoRadius(
         REDIS_GEO_KEY,
         longitude,
         latitude,
         radiusKm,
         'km',
-        'WITHDIST',
-        'WITHCOORD',
-        'ASC',
-        'COUNT',
-        limit + 1 // +1 to account for self
+        { withDist: true, withCoord: true, sort: 'ASC', count: limit + 1 }
       ) as any[];
 
       const nearbyUsers: GeoUser[] = [];
@@ -266,8 +241,9 @@ export class GeoService implements OnModuleInit {
    */
   async removeUser(userId: string): Promise<void> {
     try {
-      await this.redis.zrem(REDIS_GEO_KEY, userId);
-      await this.redis.del(`resonance:location:${userId}`);
+      await this.redisService.geoRemove(REDIS_GEO_KEY, userId);
+      const client = this.redisService.getClient();
+      await client.del(`resonance:location:${userId}`);
       this.logger.debug(`Removed location for user ${userId}`);
     } catch (error) {
       this.logger.error(`Failed to remove location for user ${userId}:`, error);
@@ -316,7 +292,8 @@ export class GeoService implements OnModuleInit {
    */
   async getUserLocation(userId: string): Promise<{ latitude: number; longitude: number } | null> {
     try {
-      const data = await this.redis.get(`resonance:location:${userId}`);
+      const client = this.redisService.getClient();
+      const data = await client.get(`resonance:location:${userId}`);
       if (data) {
         const parsed = JSON.parse(data);
         return { latitude: parsed.latitude, longitude: parsed.longitude };

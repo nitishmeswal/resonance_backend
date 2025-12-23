@@ -7,6 +7,7 @@ class InMemoryRedis {
   private store = new Map<string, { value: string; expiry?: number }>();
   private sets = new Map<string, Set<string>>();
   private hashes = new Map<string, Map<string, string>>();
+  private geoData = new Map<string, Map<string, { lng: number; lat: number }>>();
 
   private isExpired(key: string): boolean {
     const item = this.store.get(key);
@@ -86,6 +87,49 @@ class InMemoryRedis {
       item.expiry = Date.now() + seconds * 1000;
     }
     return 1;
+  }
+
+  // GEO commands for in-memory fallback
+  async geoadd(key: string, lng: number, lat: number, member: string) {
+    if (!this.geoData.has(key)) this.geoData.set(key, new Map());
+    this.geoData.get(key)!.set(member, { lng, lat });
+    return 1;
+  }
+
+  async georadius(key: string, lng: number, lat: number, radius: number, unit: string, ...options: string[]) {
+    const data = this.geoData.get(key);
+    if (!data) return [];
+    
+    const radiusMeters = unit === 'km' ? radius * 1000 : radius;
+    const results: any[] = [];
+    
+    for (const [member, coords] of data.entries()) {
+      const distance = this.haversineDistance(lat, lng, coords.lat, coords.lng);
+      if (distance <= radiusMeters) {
+        const distKm = distance / 1000;
+        results.push([member, distKm.toFixed(4), [coords.lng.toString(), coords.lat.toString()]]);
+      }
+    }
+    
+    // Sort by distance
+    results.sort((a, b) => parseFloat(a[1]) - parseFloat(b[1]));
+    return results;
+  }
+
+  async zrem(key: string, member: string) {
+    const data = this.geoData.get(key);
+    if (data) data.delete(member);
+    return 1;
+  }
+
+  private haversineDistance(lat1: number, lng1: number, lat2: number, lng2: number): number {
+    const R = 6371e3;
+    const φ1 = lat1 * Math.PI / 180;
+    const φ2 = lat2 * Math.PI / 180;
+    const Δφ = (lat2 - lat1) * Math.PI / 180;
+    const Δλ = (lng2 - lng1) * Math.PI / 180;
+    const a = Math.sin(Δφ/2) * Math.sin(Δφ/2) + Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ/2) * Math.sin(Δλ/2);
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
   }
 
   pipeline() {
@@ -291,5 +335,30 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
   async getAllConnectedUsers(): Promise<string[]> {
     const connections = await this.client.hgetall('socket:connections');
     return Object.keys(connections);
+  }
+
+  // GEO operations for Redis GEO
+  async geoAdd(key: string, lng: number, lat: number, member: string): Promise<number> {
+    return this.client.geoadd(key, lng, lat, member);
+  }
+
+  async geoRadius(
+    key: string,
+    lng: number,
+    lat: number,
+    radius: number,
+    unit: 'km' | 'm' = 'km',
+    options: { withDist?: boolean; withCoord?: boolean; count?: number; sort?: 'ASC' | 'DESC' } = {}
+  ): Promise<any[]> {
+    const args: (string | number)[] = [key, lng, lat, radius, unit];
+    if (options.withDist) args.push('WITHDIST');
+    if (options.withCoord) args.push('WITHCOORD');
+    if (options.sort) args.push(options.sort);
+    if (options.count) args.push('COUNT', options.count);
+    return (this.client as any).georadius(...args);
+  }
+
+  async geoRemove(key: string, member: string): Promise<number> {
+    return (this.client as any).zrem(key, member);
   }
 }
