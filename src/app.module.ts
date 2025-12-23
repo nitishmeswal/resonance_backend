@@ -19,6 +19,7 @@ import { ReactionsModule } from './modules/reactions/reactions.module';
 import { HistoryModule } from './modules/history/history.module';
 import { PushModule } from './modules/push/push.module';
 import { BlendModule } from './modules/blend/blend.module';
+import { GeoModule } from './modules/geo/geo.module';
 
 @Module({
   imports: [
@@ -99,6 +100,7 @@ import { BlendModule } from './modules/blend/blend.module';
     HistoryModule,
     PushModule,
     BlendModule,
+    GeoModule,
   ],
 })
 export class AppModule {}

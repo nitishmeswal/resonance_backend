@@ -16,6 +16,7 @@ import { RedisService } from '../redis/redis.service';
 import { PresenceService } from '../presence/presence.service';
 import { LocationService } from '../location/location.service';
 import { FindService } from '../find/find.service';
+import { GeoService } from '../geo/geo.service';
 
 interface AuthenticatedSocket extends Socket {
   userId?: string;
@@ -41,6 +42,7 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
     private locationService: LocationService,
     private findService: FindService,
     private jwtService: JwtService,
+    private geoService: GeoService,
   ) {}
 
   async handleConnection(client: AuthenticatedSocket) {
@@ -138,7 +140,7 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
     return { success: true };
   }
 
-  // Update location
+  // Update location (legacy geohash method)
   @SubscribeMessage('user:update_location')
   async handleUpdateLocation(
     @ConnectedSocket() client: AuthenticatedSocket,
@@ -155,6 +157,63 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
     // Get nearby users and send them to this client
     const nearbyUsers = await this.locationService.getNearbyUsers(client.userId);
     client.emit('live:nearby_users', { users: nearbyUsers });
+
+    return { success: true };
+  }
+
+  // Update location with lat/lng (NEW - uses Redis GEO for O(log n) lookup)
+  @SubscribeMessage('user:update_location_geo')
+  async handleUpdateLocationGeo(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: { latitude: number; longitude: number; radiusKm?: number },
+  ) {
+    if (!client.userId) return;
+
+    // Store in Redis GEO for fast lookup
+    await this.geoService.setUserLocation(client.userId, data.latitude, data.longitude);
+
+    // Get nearby users with full details including bearing
+    const nearbyUsers = await this.geoService.getNearbyUsersWithDetails(
+      client.userId,
+      data.latitude,
+      data.longitude,
+      data.radiusKm || 5
+    );
+
+    // Send to client with bearing data for proper map positioning
+    client.emit('live:nearby_users_geo', { 
+      users: nearbyUsers,
+      timestamp: Date.now()
+    });
+
+    this.logger.debug(`Location update for ${client.userId}: ${nearbyUsers.length} nearby users found`);
+
+    return { success: true, nearbyCount: nearbyUsers.length };
+  }
+
+  // Send reaction to another user (real-time delivery)
+  @SubscribeMessage('reaction:send')
+  async handleSendReaction(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: { targetUserId: string; reactionType: string },
+  ) {
+    if (!client.userId) return;
+
+    this.logger.log(`Reaction from ${client.userId} to ${data.targetUserId}: ${data.reactionType}`);
+
+    // Emit to target user immediately
+    this.server.to(`user:${data.targetUserId}`).emit('reaction:received', {
+      senderId: client.userId,
+      type: data.reactionType,
+      timestamp: Date.now(),
+    });
+
+    // Also emit to sender for confirmation
+    client.emit('reaction:sent', {
+      targetUserId: data.targetUserId,
+      type: data.reactionType,
+      timestamp: Date.now(),
+    });
 
     return { success: true };
   }

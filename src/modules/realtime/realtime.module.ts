@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { RealtimeGateway } from './realtime.gateway';
@@ -8,6 +8,7 @@ import { PresenceModule } from '../presence/presence.module';
 import { LocationModule } from '../location/location.module';
 import { FindModule } from '../find/find.module';
 import { AuthModule } from '../auth/auth.module';
+import { GeoModule } from '../geo/geo.module';
 
 @Module({
   imports: [
@@ -16,6 +17,7 @@ import { AuthModule } from '../auth/auth.module';
     LocationModule,
     FindModule,
     AuthModule,
+    GeoModule,
   ],
   providers: [RealtimeGateway, RealtimeService],
   exports: [RealtimeGateway, RealtimeService],
